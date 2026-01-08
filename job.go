@@ -2,6 +2,9 @@ package main
 
 import (
 	"context"
+	"crypto/rsa"
+	"crypto/x509"
+	"encoding/pem"
 	"fmt"
 	"net/url"
 	"os"
@@ -9,12 +12,10 @@ import (
 	"strconv"
 	"strings"
 	"time"
-	"crypto/rsa"
-	"crypto/x509"
-	"encoding/pem"
 
 	_ "github.com/ClickHouse/clickhouse-go/v2" // register the ClickHouse driver
 	"github.com/cenkalti/backoff"
+	_ "github.com/databricks/databricks-sql-go" // register the Databricks driver
 	"github.com/go-kit/log"
 	"github.com/go-kit/log/level"
 	"github.com/go-sql-driver/mysql" // register the MySQL driver
@@ -285,6 +286,36 @@ func (j *Job) updateConnections() {
 				continue
 			}
 
+			// Handle Databricks connections
+			if strings.HasPrefix(conn, "databricks://") {
+				u, err := url.Parse(conn)
+				if err != nil {
+					level.Error(j.log).Log("msg", "Failed to parse Databricks URL", "url", conn, "err", err)
+					continue
+				}
+
+				user := ""
+				if u.User != nil {
+					user = u.User.Username()
+				}
+
+				// Extract catalog/database from query params or path
+				database := u.Query().Get("catalog")
+				if database == "" {
+					database = strings.TrimPrefix(u.Path, "/")
+				}
+
+				j.conns = append(j.conns, &connection{
+					conn:     nil,
+					url:      conn,
+					driver:   "databricks",
+					host:     u.Host,
+					database: database,
+					user:     user,
+				})
+				continue
+			}
+
 			if strings.HasPrefix(conn, "rds-postgres://") {
 				// Reuse Postgres driver by stripping "rds-" from connection URL after building the RDS authentication token
 				conn = strings.TrimPrefix(conn, "rds-")
@@ -401,10 +432,10 @@ func (j *Job) updateConnections() {
 					level.Error(j.log).Log("msg", "Failed to parse Snowflake URL", "url", conn, "err", err)
 					continue
 				}
-			
+
 				queryParams := u.Query()
 				privateKeyPath := os.ExpandEnv(queryParams.Get("private_key_file"))
-			
+
 				cfg := &gosnowflake.Config{
 					Account:  u.Host,
 					User:     u.User.Username(),
@@ -412,7 +443,7 @@ func (j *Job) updateConnections() {
 					Database: queryParams.Get("database"),
 					Schema:   queryParams.Get("schema"),
 				}
-			
+
 				if privateKeyPath != "" {
 					// RSA key auth
 					keyBytes, err := os.ReadFile(privateKeyPath)
@@ -420,13 +451,13 @@ func (j *Job) updateConnections() {
 						level.Error(j.log).Log("msg", "Failed to read private key file", "path", privateKeyPath, "err", err)
 						continue
 					}
-			
+
 					keyBlock, _ := pem.Decode(keyBytes)
 					if keyBlock == nil {
 						level.Error(j.log).Log("msg", "Failed to decode PEM block", "path", privateKeyPath)
 						continue
 					}
-			
+
 					var privateKey *rsa.PrivateKey
 					if parsedKey, err := x509.ParsePKCS8PrivateKey(keyBlock.Bytes); err == nil {
 						privateKey, _ = parsedKey.(*rsa.PrivateKey)
@@ -436,16 +467,16 @@ func (j *Job) updateConnections() {
 						level.Error(j.log).Log("msg", "Failed to parse private key", "err", err)
 						continue
 					}
-			
+
 					cfg.Authenticator = gosnowflake.AuthTypeJwt
 					cfg.PrivateKey = privateKey
-			
+
 					dsn, err := gosnowflake.DSN(cfg)
 					if err != nil {
 						level.Error(j.log).Log("msg", "Failed to create Snowflake DSN with RSA", "err", err)
 						continue
 					}
-			
+
 					newConn.snowflakeConfig = cfg
 					newConn.snowflakeDSN = dsn
 					newConn.host = u.Host
@@ -460,20 +491,20 @@ func (j *Job) updateConnections() {
 							cfg.Port = port
 						}
 					}
-			
+
 					dsn, err := gosnowflake.DSN(cfg)
 					if err != nil {
 						level.Error(j.log).Log("msg", "Failed to create Snowflake DSN with password", "err", err)
 						continue
 					}
-			
+
 					newConn.conn, err = sqlx.Open("snowflake", dsn)
 					if err != nil {
 						level.Error(j.log).Log("msg", "Failed to open Snowflake connection", "err", err)
 						continue
 					}
 				}
-			
+
 				j.conns = append(j.conns, newConn)
 				continue
 			}
@@ -651,21 +682,21 @@ func (c *connection) connect(job *Job) error {
 				}
 				c.tokenExpirationTime = time.Now().Add(time.Hour)
 			}
-	
+
 			db, err := sqlx.Open("snowflake", c.snowflakeDSN)
 			if err != nil {
 				return fmt.Errorf("failed to open Snowflake connection: %w (host: %s)", err, c.host)
 			}
-	
+
 			db.SetMaxOpenConns(1)
 			db.SetMaxIdleConns(0)
 			db.SetConnMaxLifetime(30 * time.Minute)
-	
+
 			if err := db.Ping(); err != nil {
 				db.Close()
 				return fmt.Errorf("failed to ping Snowflake: %w (host: %s)", err, c.host)
 			}
-	
+
 			c.conn = db
 			return nil
 		}
@@ -675,6 +706,8 @@ func (c *connection) connect(job *Job) error {
 	case "mysql":
 		dsn = strings.TrimPrefix(dsn, "mysql://")
 		dsn = strings.TrimPrefix(dsn, "rds-mysql://")
+	case "databricks":
+		dsn = strings.TrimPrefix(dsn, "databricks://")
 	case "clickhouse+tcp", "clickhouse+http": // Support both http and tcp connections
 		dsn = strings.TrimPrefix(dsn, "clickhouse+")
 		c.driver = "clickhouse"
