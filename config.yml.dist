@@ -193,3 +193,22 @@ jobs:
     query:  |
             SELECT datname::text, usename::text, COUNT(*)::float AS count
             FROM pg_stat_activity GROUP BY datname, usename;
+- name: "databricks"
+  interval: '5m'
+  connections:
+  # Connect to Databricks SQL Warehouse or All Purpose Cluster
+  - 'databricks://token:TOKEN@INSTANCE.cloud.databricks.com:443/sql/1.0/warehouses/WAREHOUSE_ID'
+  queries:
+  - name: "databricks_usage"
+    help: "Total databricks usage by date"
+    values:
+      - "total"
+    query: |
+        SELECT 
+            usage_date,
+            SUM(usage_quantity) AS total
+        FROM 
+            system.billing.usage
+        WHERE 
+            usage_date = CURRENT_DATE()
+        GROUP BY usage_date;
