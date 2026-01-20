@@ -197,6 +197,9 @@ jobs:
   interval: '5m'
   connections:
   # Connect to Databricks SQL Warehouse or All Purpose Cluster
+  # Connect with M2M
+  # - databricks://your-workspace.cloud.databricks.com/sql/1.0/warehouses/abc123?catalog=main&authType=m2m&clientId=YOUR_CLIENT_ID&clientSecret=YOUR_CLIENT_SECRET
+  # Connect with a token
   - 'databricks://token:TOKEN@INSTANCE.cloud.databricks.com:443/sql/1.0/warehouses/WAREHOUSE_ID'
   queries:
   - name: "databricks_usage"

@@ -4,6 +4,8 @@ import (
 	"context"
 	"crypto/rsa"
 	"crypto/x509"
+	"database/sql"
+	"database/sql/driver"
 	"encoding/pem"
 	"fmt"
 	"net/url"
@@ -15,7 +17,9 @@ import (
 
 	_ "github.com/ClickHouse/clickhouse-go/v2" // register the ClickHouse driver
 	"github.com/cenkalti/backoff"
-	_ "github.com/databricks/databricks-sql-go" // register the Databricks driver
+	dbsql "github.com/databricks/databricks-sql-go" // register the Databricks driver
+	"github.com/databricks/databricks-sql-go/auth/oauth/m2m"
+	"github.com/databricks/databricks-sql-go/auth/oauth/u2m"
 	"github.com/go-kit/log"
 	"github.com/go-kit/log/level"
 	"github.com/go-sql-driver/mysql" // register the MySQL driver
@@ -287,6 +291,10 @@ func (j *Job) updateConnections() {
 			}
 
 			// Handle Databricks connections
+			// Supports standard token auth and OAuth (M2M and U2M)
+			// OAuth M2M: databricks://host/httpPath?catalog=xxx&authType=m2m&clientId=xxx&clientSecret=xxx
+			// OAuth U2M: databricks://host/httpPath?catalog=xxx&authType=u2m
+			// Token auth: databricks://token:xxx@host/httpPath?catalog=xxx
 			if strings.HasPrefix(conn, "databricks://") {
 				u, err := url.Parse(conn)
 				if err != nil {
@@ -300,19 +308,35 @@ func (j *Job) updateConnections() {
 				}
 
 				// Extract catalog/database from query params or path
-				database := u.Query().Get("catalog")
-				if database == "" {
-					database = strings.TrimPrefix(u.Path, "/")
-				}
+				queryParams := u.Query()
+				database := queryParams.Get("catalog")
+				httpPath := strings.TrimPrefix(u.Path, "/")
 
-				j.conns = append(j.conns, &connection{
+				// Check for OAuth authentication type
+				authType := queryParams.Get("authType")
+				clientID := queryParams.Get("clientId")
+				clientSecret := queryParams.Get("clientSecret")
+
+				newConn := &connection{
 					conn:     nil,
 					url:      conn,
 					driver:   "databricks",
 					host:     u.Host,
 					database: database,
 					user:     user,
-				})
+				}
+
+				// Configure OAuth if specified
+				if authType == "m2m" || authType == "u2m" {
+					newConn.databricksOAuthType = authType
+					newConn.databricksClientID = clientID
+					newConn.databricksClientSecret = clientSecret
+					newConn.databricksHost = u.Host
+					newConn.databricksHTTPPath = httpPath
+					newConn.databricksCatalog = database
+				}
+
+				j.conns = append(j.conns, newConn)
 				continue
 			}
 
@@ -700,6 +724,59 @@ func (c *connection) connect(job *Job) error {
 			c.conn = db
 			return nil
 		}
+	}
+	// Handle Databricks OAuth connections (M2M and U2M)
+	if c.driver == "databricks" && c.databricksOAuthType != "" {
+		var connector driver.Connector
+		var err error
+
+		connectorOptions := []dbsql.ConnOption{
+			dbsql.WithServerHostname(c.databricksHost),
+			dbsql.WithHTTPPath(c.databricksHTTPPath),
+		}
+
+		if c.databricksCatalog != "" {
+			connectorOptions = append(connectorOptions, dbsql.WithInitialNamespace(c.databricksCatalog, ""))
+		}
+
+		switch c.databricksOAuthType {
+		case "m2m":
+			// Machine-to-Machine OAuth using client credentials
+			if c.databricksClientID == "" || c.databricksClientSecret == "" {
+				return fmt.Errorf("databricks M2M OAuth requires clientId and clientSecret parameters")
+			}
+			authenticator := m2m.NewAuthenticator(c.databricksClientID, c.databricksClientSecret, c.databricksHost)
+			connectorOptions = append(connectorOptions, dbsql.WithAuthenticator(authenticator))
+
+		case "u2m":
+			// User-to-Machine OAuth (interactive browser-based authentication)
+			authenticator, err := u2m.NewAuthenticator(c.databricksHost, 2*time.Minute)
+			if err != nil {
+				return fmt.Errorf("failed to create Databricks U2M authenticator: %w", err)
+			}
+			connectorOptions = append(connectorOptions, dbsql.WithAuthenticator(authenticator))
+		}
+
+		connector, err = dbsql.NewConnector(connectorOptions...)
+		if err != nil {
+			return fmt.Errorf("failed to create Databricks connector: %w (host: %s)", err, c.host)
+		}
+
+		db := sql.OpenDB(connector)
+		db.SetMaxOpenConns(1)
+		db.SetMaxIdleConns(1)
+		db.SetConnMaxLifetime(job.Interval * 2)
+
+		// Wrap with sqlx
+		c.conn = sqlx.NewDb(db, "databricks")
+
+		// execute StartupSQL
+		for _, query := range job.StartupSQL {
+			level.Debug(job.log).Log("msg", "StartupSQL", "Query:", query)
+			c.conn.MustExec(query)
+		}
+
+		return nil
 	}
 	dsn := c.url
 	switch c.driver {
