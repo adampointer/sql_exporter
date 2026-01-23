@@ -128,7 +128,7 @@ jobs:
   interval: '5m'
   connections:
   # see https://godoc.org/github.com/segmentio/go-athena#Driver.Open
-  - 'athena://HOST_VALUE_IGNORED/<DB_NAME>?db=<DB_NAME>&region=<AWS_REGION>&output_location=s3://aws-athena-query-results-<ACCOUNT_ID>-<REGION>'
+  - 'athena://?db=<DB_NAME>&region=<AWS_REGION>&output_location=s3://aws-athena-query-results-<ACCOUNT_ID>-<REGION>'
   queries:
   - name: "athena_query_rows"
     help: "Number of rows..."

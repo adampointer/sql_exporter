@@ -441,10 +441,7 @@ func (j *Job) updateConnections() {
 				user:     user,
 			}
 			if newConn.driver == "athena" {
-				// call go-athena's Open() to ensure conn.db is set,
-				// otherwise API calls will complain about an empty database field:
-				// "InvalidParameter: 1 validation error(s) found. - minimum field size of 1, StartQueryExecutionInput.QueryExecutionContext.Database."
-				newConn.conn, err = sqlx.Open("athena", u.String())
+				newConn.conn, err = sqlx.Open("athena", u.RawQuery)
 				if err != nil {
 					level.Error(j.log).Log("msg", "Failed to open Athena connection", "connection", conn, "err", err)
 					continue
